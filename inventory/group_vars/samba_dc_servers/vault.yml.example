@@ -1,0 +1,7 @@
+---
+# Copy to vault.yml, set real values, then encrypt:
+#   cp vault.yml.example vault.yml
+#   $EDITOR vault.yml
+#   ansible-vault encrypt --vault-password-file .vault_pass vault.yml
+vault_samba_admin_password: "CHANGE-ME-set-a-strong-password-then-vault-encrypt-this-file"
+vault_technitium_dns_api_token: "CHANGE-ME-issue-a-technitium-api-token-then-vault-encrypt-this-file"
