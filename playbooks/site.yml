@@ -21,10 +21,6 @@
     - ansible.builtin.wait_for_connection:
         timeout: 300
 
-- name: Baseline configuration (hostname, /etc/hosts, base packages, timezone)
-  hosts: samba_dc_servers
-  roles:
-    - common
 
 - name: Install Samba on dc1 and dc2
   hosts: samba_dc_servers

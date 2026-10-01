@@ -6,7 +6,7 @@ roles:
   # fleet (git-sourced dependency + explicit include_role, no Galaxy
   # meta/main.yml `dependencies:`).
   - name: technitium_dns
-    src: git@github.com:jnix85/ansible-role-technitium-dns.git
+    src: https://github.com/jnix85/ansible-role-technitium-dns.git
     version: main
 
 collections:
