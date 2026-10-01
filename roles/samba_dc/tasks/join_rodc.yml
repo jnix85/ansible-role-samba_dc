@@ -1,0 +1,5 @@
+---
+# Backwards compatibility wrapper for join_secondary.yml (explicitly sets role: rodc)
+- ansible.builtin.include_tasks: join_secondary.yml
+  vars:
+    samba_secondary_role: rodc

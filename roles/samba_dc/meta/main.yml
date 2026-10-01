@@ -1,0 +1,18 @@
+---
+galaxy_info:
+  role_name: samba_dc
+  author: infrastructure-team
+  description: Install, provision, and manage a Samba Active Directory domain controller (writable DC or RODC) with WINS and NTP signing
+  license: MIT
+  min_ansible_version: "2.15"
+  platforms:
+    - name: Debian
+      versions:
+        - trixie
+  galaxy_tags:
+    - samba
+    - active-directory
+    - dns
+    - wins
+    - ntp
+dependencies: []

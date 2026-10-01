@@ -1,0 +1,184 @@
+---
+samba_realm: DIRECTORY.CLAWDUINO.COM
+samba_domain: DIRECTORY          # NetBIOS domain name (<=15 chars)
+samba_dns_zone: "{{ samba_realm | lower }}"    # directory.clawduino.com
+
+samba_packages:
+  - samba
+  - samba-dsdb-modules
+  - samba-vfs-modules
+  - winbind
+  - smbclient
+  - krb5-user
+  - ldb-tools
+  - attr
+  - chrony
+
+# AD ports for reference (no guest-level firewall role exists — every other
+# service VM relies on the network perimeter, not a host firewall):
+#   53 (dns), 88 (kerberos), 135 (rpc epmap), 137/138 (netbios/wins),
+#   389/636 (ldap/ldaps), 445 (smb), 464 (kpasswd),
+#   3268/3269 (global catalog — primary only),
+#   RPC dynamic range (smb.conf `rpc server dynamic port range`).
+
+# Every DC also answers WINS (legacy NetBIOS name resolution) so older
+# clients/apps that still rely on it keep working. Classic Samba WINS
+# (nmbd) has no replication between servers at all (confirmed against
+# samba.org's own docs — see docs/research/wins-implementations.md), so only
+# the primary runs as a WINS server; the RODC (and any other secondary)
+# points at it as a client instead of also enabling `wins support`. The AD
+# DC's own wrepl service may support real WINS replication (see that same
+# research doc + docs/adr/0002-wins-single-master.md) but this is unverified
+# for this Samba build and deliberately not relied on here.
+samba_wins_support: "{{ inventory_hostname == samba_primary_host }}"
+samba_wins_server: "{{ samba_primary_ip }}"
+
+# Role of the secondary domain controller: "rodc" (Read-Only Domain Controller)
+# or "dc" (writable replica domain controller). Set to "rodc" by default.
+samba_secondary_role: rodc
+
+samba_secondary_host: "{{ (groups['samba_dc_secondary'] | default(groups['samba_dc_rodc'] | default([]))) | first | default('dc2') }}"
+samba_secondary_ip: "{{ hostvars[samba_secondary_host].ansible_host | default(hostvars[samba_secondary_host].vm_ip | default('10.1.0.62')) if samba_secondary_host in hostvars else '10.1.0.62' }}"
+samba_secondary_fqdn: "{{ hostvars[samba_secondary_host].vm_fqdn | default(samba_secondary_host ~ '.' ~ samba_dns_zone) if samba_secondary_host in hostvars else 'dc2.' ~ samba_dns_zone }}"
+
+# Aliases for backwards compatibility with rodc-specific nomenclature
+samba_rodc_host: "{{ samba_secondary_host }}"
+samba_rodc_ip: "{{ samba_secondary_ip }}"
+samba_rodc_fqdn: "{{ samba_secondary_fqdn }}"
+
+# DNS is external (Technitium — see docs/adr/0001-external-dns-via-technitium.md),
+# not Samba's own AD-integrated DNS: dc1/dc2 provision with --dns-backend=NONE
+# and Ansible pushes the AD zone's records into Technitium declaratively
+# (tasks/provision.yml, tasks/join_secondary.yml), instead of Samba talking dynamic
+# DNS/TSIG to it. technitium_dns_api_url/api_token are the connection details
+# for those include_role calls — the api_url points at the existing cluster's
+# VIP, not a Technitium node this role manages itself.
+technitium_dns_api_url: "http://{{ vips.dns }}:5380"
+# technitium_dns_api_token: required, no sane default — see
+#   inventory/group_vars/samba_dc_servers/secrets.yml
+
+# The standard AD DNS record set for this two-DC topology: an A record per
+# DC, plus the SRV records AD clients/DC-locator need to find LDAP, Kerberos,
+# kpasswd and the global catalog (dc1/primary, and dc2 if writable DC), including
+# their `_msdcs.<realm>` equivalents. Passed to the technitium_dns role's
+# samba_ad_records task (see tasks/provision.yml, join_secondary.yml).
+# NTDS-GUID replication CNAMEs are dynamically extracted from sam.ldb and pushed
+# to Technitium upon provisioning and joining.
+samba_dns_records: "{{ samba_base_dns_records + samba_secondary_gc_records }}"
+
+samba_secondary_gc_records: >-
+  {{ [
+       {'domain': '_gc._tcp.' ~ samba_dns_zone, 'type': 'SRV', 'data': {'priority': 0, 'weight': 100, 'port': 3268, 'target': samba_secondary_fqdn}},
+       {'domain': '_ldap._tcp.gc._msdcs.' ~ samba_dns_zone, 'type': 'SRV', 'data': {'priority': 0, 'weight': 100, 'port': 3268, 'target': samba_secondary_fqdn}}
+     ] if (samba_secondary_role | lower == 'dc') else [] }}
+
+samba_base_dns_records:
+  - domain: "{{ samba_primary_fqdn }}"
+    type: A
+    data: { ipAddress: "{{ samba_primary_ip }}" }
+    exclusive: true
+  - domain: "{{ samba_secondary_fqdn }}"
+    type: A
+    data: { ipAddress: "{{ samba_secondary_ip }}" }
+    exclusive: true
+
+  # _ldap._tcp / _kerberos._tcp+udp / _kpasswd._tcp+udp / their dc._msdcs
+  # equivalents: both DCs answer these.
+  - { domain: "_ldap._tcp.{{ samba_dns_zone }}", type: SRV, data: { priority: 0, weight: 100, port: 389, target: "{{ samba_primary_fqdn }}" } }
+  - { domain: "_ldap._tcp.{{ samba_dns_zone }}", type: SRV, data: { priority: 0, weight: 100, port: 389, target: "{{ samba_secondary_fqdn }}" } }
+  - { domain: "_kerberos._tcp.{{ samba_dns_zone }}", type: SRV, data: { priority: 0, weight: 100, port: 88, target: "{{ samba_primary_fqdn }}" } }
+  - { domain: "_kerberos._tcp.{{ samba_dns_zone }}", type: SRV, data: { priority: 0, weight: 100, port: 88, target: "{{ samba_secondary_fqdn }}" } }
+  - { domain: "_kerberos._udp.{{ samba_dns_zone }}", type: SRV, data: { priority: 0, weight: 100, port: 88, target: "{{ samba_primary_fqdn }}" } }
+  - { domain: "_kerberos._udp.{{ samba_dns_zone }}", type: SRV, data: { priority: 0, weight: 100, port: 88, target: "{{ samba_secondary_fqdn }}" } }
+  - { domain: "_kpasswd._tcp.{{ samba_dns_zone }}", type: SRV, data: { priority: 0, weight: 100, port: 464, target: "{{ samba_primary_fqdn }}" } }
+  - { domain: "_kpasswd._tcp.{{ samba_dns_zone }}", type: SRV, data: { priority: 0, weight: 100, port: 464, target: "{{ samba_secondary_fqdn }}" } }
+  - { domain: "_kpasswd._udp.{{ samba_dns_zone }}", type: SRV, data: { priority: 0, weight: 100, port: 464, target: "{{ samba_primary_fqdn }}" } }
+  - { domain: "_kpasswd._udp.{{ samba_dns_zone }}", type: SRV, data: { priority: 0, weight: 100, port: 464, target: "{{ samba_secondary_fqdn }}" } }
+  - { domain: "_ldap._tcp.dc._msdcs.{{ samba_dns_zone }}", type: SRV, data: { priority: 0, weight: 100, port: 389, target: "{{ samba_primary_fqdn }}" } }
+  - { domain: "_ldap._tcp.dc._msdcs.{{ samba_dns_zone }}", type: SRV, data: { priority: 0, weight: 100, port: 389, target: "{{ samba_secondary_fqdn }}" } }
+  - { domain: "_kerberos._tcp.dc._msdcs.{{ samba_dns_zone }}", type: SRV, data: { priority: 0, weight: 100, port: 88, target: "{{ samba_primary_fqdn }}" } }
+  - { domain: "_kerberos._tcp.dc._msdcs.{{ samba_dns_zone }}", type: SRV, data: { priority: 0, weight: 100, port: 88, target: "{{ samba_secondary_fqdn }}" } }
+
+  # PDC emulator (primary DC)
+  - { domain: "_ldap._tcp.pdc._msdcs.{{ samba_dns_zone }}", type: SRV, data: { priority: 0, weight: 100, port: 389, target: "{{ samba_primary_fqdn }}" } }
+
+  # _gc._tcp / _ldap._tcp.gc._msdcs: global catalog (dc1/primary always; dc2 added via samba_secondary_gc_records if writable DC).
+  - { domain: "_gc._tcp.{{ samba_dns_zone }}", type: SRV, data: { priority: 0, weight: 100, port: 3268, target: "{{ samba_primary_fqdn }}" } }
+  - { domain: "_ldap._tcp.gc._msdcs.{{ samba_dns_zone }}", type: SRV, data: { priority: 0, weight: 100, port: 3268, target: "{{ samba_primary_fqdn }}" } }
+
+  # Static CNAME delegation for each DC's ACME DNS-01 challenge — see
+  # samba_cert_acme_dns_zone above. One-time, not touched by tasks/certificate.yml
+  # itself (which only ever writes/removes the TXT record at the alias target).
+  - domain: "_acme-challenge.{{ samba_primary_fqdn }}"
+    type: CNAME
+    data: { cname: "{{ samba_primary_host }}.acme-challenge.{{ samba_cert_acme_dns_zone }}" }
+    exclusive: true
+  - domain: "_acme-challenge.{{ samba_secondary_fqdn }}"
+    type: CNAME
+    data: { cname: "{{ samba_secondary_host }}.acme-challenge.{{ samba_cert_acme_dns_zone }}" }
+    exclusive: true
+
+# Kerberos requires clocks within a few minutes of each other, so every DC
+# runs chrony and additionally signs NTP replies for domain-joined Windows
+# clients via smb.conf `ntp signd socket directory` + chrony's
+# `bindcmdaddress` (see tasks/configure.yml and
+# https://wiki.samba.org/index.php/Setting_up_NTP_signing_using_Chrony).
+samba_ntp_signd_dir: /var/lib/samba/ntp_signd
+samba_ntp_pool: pool.ntp.org
+
+# Each DC requests its own ACME certificate (DNS-01, via the fleet's
+# Technitium cluster — see tasks/certificate.yml and
+# docs/adr/0003-ldaps-cert-via-acme-dns01.md) for LDAPS. Not a SAN cert
+# shared between dc1/dc2: that would mean copying a private key between
+# hosts, which this role deliberately avoids.
+samba_cert_enabled: true
+
+# The domain the running host requests a certificate for — dc1/dc2's own
+# FQDN, whichever this play is currently targeting.
+samba_cert_domain: "{{ samba_primary_fqdn if inventory_hostname == samba_primary_host else samba_secondary_fqdn }}"
+
+# Let's Encrypt production by default. Set samba_cert_acme_staging: true while testing
+# to avoid hitting rate limits (https://acme-staging-v02.api.letsencrypt.org/directory).
+samba_cert_acme_staging: false
+samba_cert_acme_directory_url: "{{ 'https://acme-staging-v02.api.letsencrypt.org/directory' if (samba_cert_acme_staging | bool) else 'https://acme-v02.api.letsencrypt.org/directory' }}"
+samba_cert_acme_version: 2
+
+# REQUIRED, no sane default — the ACME account's contact address.
+samba_cert_acme_account_email: ""
+
+# Agreeing accepts the ACME server's terms of service. REQUIRED to be true to
+# issue a certificate.
+samba_cert_acme_terms_agreed: false
+
+# Reissue once fewer than this many days of validity remain. Re-running the
+# play is what actually renews the certificate — schedule it (cron, AWX, CI).
+# tasks/certificate.yml is a no-op while the certificate stays fresh.
+samba_cert_remaining_days: 30
+
+# samba_dns_zone (directory.clawduino.com) isn't publicly delegated (it's an
+# internal AD zone — see group_vars/samba_dc_servers/main.yml), so Let's
+# Encrypt's DNS-01 validators can't see a TXT record written there directly.
+# Instead this role delegates just the challenge name: a static CNAME
+# `_acme-challenge.{{ samba_cert_domain }}` -> samba_cert_acme_challenge_alias
+# (pushed alongside the rest of samba_dns_records below), pointing into
+# samba_cert_acme_dns_zone — dns.clawduino.com, which Technitium is already
+# authoritative for and which this fleet's real public DNS delegates to it
+# (dns_cluster_zone). The actual TXT value is then written at the alias
+# name in that zone instead of under samba_dns_zone. Leave
+# samba_cert_acme_dns_zone empty to instead write the TXT record directly
+# under samba_dns_zone (only useful if that zone becomes publicly delegated
+# itself some day).
+samba_cert_acme_dns_zone: dns.clawduino.com
+samba_cert_acme_challenge_alias: "{{ inventory_hostname }}.acme-challenge.{{ samba_cert_acme_dns_zone }}"
+
+samba_cert_dir: /var/lib/samba/private/tls
+samba_cert_key_file: "{{ samba_cert_dir }}/acme-key.pem"
+samba_cert_cert_file: "{{ samba_cert_dir }}/acme-cert.pem"
+samba_cert_ca_file: "{{ samba_cert_dir }}/acme-ca.pem"
+samba_cert_fullchain_file: "{{ samba_cert_dir }}/acme-fullchain.pem"
+
+# Required, no sane default — set in group_vars/host_vars or -e:
+#   samba_admin_password, samba_primary_ip, samba_primary_host,
+#   samba_primary_fqdn, samba_secondary_ip, samba_secondary_host, samba_secondary_fqdn,
+#   technitium_dns_api_token, samba_cert_acme_account_email,
+#   samba_cert_acme_terms_agreed, vips, vm_fqdn, domain

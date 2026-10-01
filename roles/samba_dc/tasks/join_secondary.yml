@@ -1,0 +1,99 @@
+---
+# Secondary DC (dc2). Must run after provision.yml has completed on dc1.
+# Supports both writable replica DC (samba_secondary_role: dc) and
+# Read-Only Domain Controller (samba_secondary_role: rodc).
+#
+# DNS is external (Technitium), not Samba's own AD-integrated DNS — see
+# provision.yml's header comment and README.md.
+
+- name: Point resolv.conf at the Technitium DNS cluster
+  ansible.builtin.copy:
+    content: |
+      nameserver {{ vips.dns }}
+      search {{ domain }}
+    dest: /etc/resolv.conf
+    mode: "0644"
+  become: true
+
+- name: Wait for primary DC LDAP port
+  ansible.builtin.wait_for:
+    host: "{{ samba_primary_ip }}"
+    port: 389
+    timeout: 300
+
+- name: Check whether this secondary DC has already joined
+  ansible.builtin.stat:
+    path: /var/lib/samba/private/sam.ldb
+  register: samba_dc_joined
+  become: true
+
+- name: Join domain as secondary controller
+  when: not samba_dc_joined.stat.exists
+  become: true
+  no_log: true
+  block:
+    # Same ps-visibility caveat as provision.yml's --adminpass.
+    - name: Run samba-tool domain join
+      ansible.builtin.command:
+        cmd: >-
+          samba-tool domain join {{ samba_dns_zone }} {{ samba_secondary_role | upper }}
+          -U{{ samba_domain }}\Administrator%{{ samba_admin_password }}
+          --dns-backend=NONE
+      register: samba_dc_join_result
+      changed_when: true
+
+    - name: Enable and start samba-ad-dc.service
+      ansible.builtin.systemd:
+        name: samba-ad-dc
+        state: started
+        enabled: true
+        daemon_reload: true
+
+- name: Ensure samba-ad-dc.service is running (idempotent re-run)
+  ansible.builtin.systemd:
+    name: samba-ad-dc
+    state: started
+    enabled: true
+  become: true
+  when: samba_dc_joined.stat.exists
+
+- name: Push Samba AD DNS records into Technitium
+  ansible.builtin.include_role:
+    name: technitium_dns
+    tasks_from: samba_ad_records
+  vars:
+    technitium_dns_samba_api_url: "{{ technitium_dns_api_url }}"
+    technitium_dns_samba_api_token: "{{ technitium_dns_api_token }}"
+    technitium_dns_samba_zone: "{{ samba_dns_zone }}"
+    technitium_dns_samba_records: "{{ samba_dns_records }}"
+
+- name: Query secondary DC NTDS Settings objectGUID for replication DNS
+  ansible.builtin.shell:
+    cmd: >-
+      python3 -c "import subprocess, sys, re;
+      out = subprocess.check_output(['ldbsearch', '-H', '/var/lib/samba/private/sam.ldb', '(invocationId=*)', '--cross-ncs', 'dn', 'objectGUID'], text=True);
+      for block in out.split('\n\n'):
+          if re.search(r'CN=' + re.escape('{{ inventory_hostname }}') + r',CN=Servers', block, re.I):
+              m = re.search(r'objectGUID:\s*([0-9a-fA-F-]+)', block)
+              if m:
+                  print(m.group(1).lower().strip()); sys.exit(0)
+      sys.exit(1)"
+  register: samba_secondary_ntds_guid_result
+  changed_when: false
+  failed_when: false
+  become: true
+
+- name: Push secondary DC NTDS GUID replication CNAME into Technitium
+  when: samba_secondary_ntds_guid_result.rc == 0 and samba_secondary_ntds_guid_result.stdout | length > 0
+  ansible.builtin.include_role:
+    name: technitium_dns
+    tasks_from: samba_ad_records
+  vars:
+    technitium_dns_samba_api_url: "{{ technitium_dns_api_url }}"
+    technitium_dns_samba_api_token: "{{ technitium_dns_api_token }}"
+    technitium_dns_samba_zone: "{{ samba_dns_zone }}"
+    technitium_dns_samba_records:
+      - domain: "{{ samba_secondary_ntds_guid_result.stdout.strip() }}._msdcs.{{ samba_dns_zone }}"
+        type: CNAME
+        data: { cname: "{{ samba_secondary_fqdn }}" }
+        exclusive: true

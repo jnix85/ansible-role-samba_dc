@@ -1,0 +1,43 @@
+---
+# Runs on both dc1 and dc2, before either is provisioned/joined. Package
+# install needs working internet DNS resolution (cloud-init's
+# bootstrap_resolvers), so this deliberately does NOT touch resolv.conf —
+# provision.yml/join_rodc.yml switch it to self/peer once Samba is live.
+
+- name: Seed krb5-config debconf answers (avoid interactive realm prompt)
+  ansible.builtin.debconf:
+    name: krb5-config
+    question: "{{ item.question }}"
+    value: "{{ item.value }}"
+    vtype: string
+  loop:
+    - { question: "krb5-config/default_realm", value: "{{ samba_realm }}" }
+    - { question: "krb5-config/kerberos_servers", value: "{{ vm_fqdn }}" }
+    - { question: "krb5-config/admin_server", value: "{{ vm_fqdn }}" }
+  become: true
+
+- name: Install Samba AD DC packages
+  ansible.builtin.apt:
+    name: "{{ samba_packages }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  become: true
+
+# VERIFY: confirm Debian 13 (trixie)'s `samba` package still ships full AD
+# DC support out of the box (true since Buster) on first contact with the
+# real environment.
+
+# Debian's package starts these standalone on install; AD DC mode replaces
+# them with the unified samba-ad-dc.service after provision/join.
+- name: Stop and disable standalone Samba services
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: stopped
+    enabled: false
+  loop:
+    - smbd
+    - nmbd
+    - winbind
+  become: true
+  failed_when: false

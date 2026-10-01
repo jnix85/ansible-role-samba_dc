@@ -1,0 +1,69 @@
+---
+# Samba AD domain — dc1 (writable DC, all FSMO roles) + dc2 (RODC).
+# VMs provisioned by the standalone ~/src/infra/terraform/samba_dc project
+# (see host_vars/dc{1,2}.yml), NOT the proxmox_vm role. No keepalived VIP here (unlike every other service in
+# this repo) — AD clients locate DCs via DNS SRV records / the DC-locator
+# process and talk to each DC directly; a floating IP in front of
+# LDAP/Kerberos breaks site-affinity and Kerberos SPNs.
+
+samba_realm: DIRECTORY.CLAWDUINO.COM
+samba_domain: DIRECTORY          # NetBIOS domain name (<=15 chars)
+samba_dns_zone: "{{ samba_realm | lower }}"    # directory.clawduino.com
+
+# dc1/dc2 live under their own AD zone, not the default vm_fqdn pattern.
+vm_fqdn: "{{ inventory_hostname }}.{{ samba_dns_zone }}"
+
+samba_primary_host: "{{ groups['samba_dc_primary'] | first }}"
+samba_primary_ip: "{{ hostvars[samba_primary_host].ansible_host | default(hostvars[samba_primary_host].vm_ip | default('10.1.0.61')) }}"
+samba_primary_fqdn: "{{ hostvars[samba_primary_host].vm_fqdn | default(samba_primary_host ~ '.' ~ samba_dns_zone) }}"
+
+# Secondary DC role: "rodc" (Read-Only DC) or "dc" (writable replica DC)
+samba_secondary_role: rodc
+
+samba_secondary_host: "{{ (groups['samba_dc_secondary'] | default(groups['samba_dc_rodc'] | default([]))) | first | default('dc2') }}"
+samba_secondary_ip: "{{ hostvars[samba_secondary_host].ansible_host | default(hostvars[samba_secondary_host].vm_ip | default('10.1.0.62')) if samba_secondary_host in hostvars else '10.1.0.62' }}"
+samba_secondary_fqdn: "{{ hostvars[samba_secondary_host].vm_fqdn | default(samba_secondary_host ~ '.' ~ samba_dns_zone) if samba_secondary_host in hostvars else 'dc2.' ~ samba_dns_zone }}"
+
+# Aliases for backwards compatibility
+samba_rodc_host: "{{ samba_secondary_host }}"
+samba_rodc_ip: "{{ samba_secondary_ip }}"
+samba_rodc_fqdn: "{{ samba_secondary_fqdn }}"
+
+samba_packages:
+  - samba
+  - samba-dsdb-modules
+  - samba-vfs-modules
+  - winbind
+  - smbclient
+  - krb5-user
+  - ldb-tools
+  - attr
+  - chrony
+
+# AD ports for reference (no guest-level firewall role exists yet in this
+# repo — every other service VM relies on the network perimeter, not a
+# host firewall, so this deliberately doesn't add one either):
+#   53 (dns), 88 (kerberos), 135 (rpc epmap), 389/636 (ldap/ldaps),
+#   445 (smb), 464 (kpasswd), 3268/3269 (global catalog — dc1 only),
+#   RPC dynamic range (smb.conf `rpc server dynamic port range`).
+
+# DNS for the AD zone is now hosted directly by Technitium as a Primary zone
+# (see docs/adr/0001-external-dns-via-technitium.md) — dc1/dc2 push records
+# into it declaratively rather than Technitium forwarding to Samba's own DNS,
+# so there is no forwarder list to maintain here any more. Technitium itself
+# is authoritative for dns_cluster_zone (dns.clawduino.com) and now also for
+# samba_dns_zone (directory.clawduino.com) as a separate, independent zone —
+# neither implies authority over the clawduino.com apex.
+
+# LDAPS certificate (see roles/samba_dc/tasks/certificate.yml and
+# docs/adr/0003-ldaps-cert-via-acme-dns01.md). samba_dns_zone
+# (directory.clawduino.com) isn't publicly delegated, so DNS-01 goes through
+# CNAME delegation into dns.clawduino.com instead — see
+# samba_cert_acme_dns_zone's comment in roles/samba_dc/defaults/main.yml for
+# how; nothing to configure for that part here, it's handled automatically
+# (the CNAMEs are pushed as part of samba_dns_records, same as every other
+# record). Still required: read Let's Encrypt's Subscriber Agreement, then
+# set the account email below.
+samba_cert_enabled: true
+samba_cert_acme_account_email: "CHANGE-ME@clawduino.com"
+samba_cert_acme_terms_agreed: true

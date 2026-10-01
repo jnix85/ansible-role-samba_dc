@@ -1,0 +1,19 @@
+---
+roles:
+  # AD zone/records are pushed into the existing Technitium DNS cluster
+  # declaratively (see roles/samba_dc/tasks/provision.yml, join_rodc.yml) —
+  # not vendored here, matching every other cross-role integration in this
+  # fleet (git-sourced dependency + explicit include_role, no Galaxy
+  # meta/main.yml `dependencies:`).
+  - name: technitium_dns
+    src: git@github.com:jnix85/ansible-role-technitium-dns.git
+    version: main
+
+collections:
+  # Only needed when secrets_backend: infisical (see group_vars/all/secrets.yml).
+  - name: infisical.vault
+    version: ">=1.1.0"
+  # openssl_privatekey/openssl_csr/acme_certificate/openssl_pkcs12 for the
+  # DNS-01 LDAPS certificate (see roles/samba_dc/tasks/certificate.yml).
+  - name: community.crypto
+    version: ">=2.16.0"

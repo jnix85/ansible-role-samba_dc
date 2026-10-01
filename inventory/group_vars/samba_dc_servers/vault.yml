@@ -1,0 +1,19 @@
+---
+# NOT YET ENCRYPTED. Every other group_vars/*/vault.yml in this repo is
+# ansible-vault-encrypted, but ansible-vault isn't installed on this Mac, so
+# this file couldn't be encrypted here. Before running playbooks/17-samba-dc.yml:
+#
+#   1. Replace the placeholders below: vault_samba_admin_password with a
+#      real, strong password (this becomes the AD Administrator / domain
+#      password — samba-tool enforces a 12-char minimum, but treat it like
+#      the domain's root credential); vault_technitium_dns_api_token with a
+#      named, non-expiring API token issued from the Technitium cluster
+#      (technitium_dns_create_api_token in ansible-role-technitium-dns) —
+#      scoped to zone/record management, not the cluster admin account.
+#   2. Wherever you have ansible-core installed:
+#        ansible-vault encrypt --vault-password-file .vault_pass \
+#          inventory/group_vars/samba_dc_servers/vault.yml
+#      (matches the vault_password_file wired in ansible.cfg / the existing
+#      .vault_pass used for dns_servers/netbox_servers/unifi_servers).
+vault_samba_admin_password: "CHANGE-ME-set-a-strong-password-then-vault-encrypt-this-file"
+vault_technitium_dns_api_token: "CHANGE-ME-issue-a-technitium-api-token-then-vault-encrypt-this-file"

@@ -1,0 +1,121 @@
+---
+# Requests/renews this DC's own LDAPS certificate from an ACME server via
+# DNS-01 — no port 80/443 exposure on the DC, no TSIG/dynamic-DNS-update
+# trust needed. The challenge record is published through the technitium_dns
+# role's own technitium_dns_record module (see docs/adr/0003-ldaps-cert-via-
+# acme-dns01.md for why), the same declarative-record-push architecture
+# already used for this DC's A/SRV records in provision.yml/join_rodc.yml.
+#
+# Run from configure.yml on both dc1 and dc2 — each DC gets its own
+# certificate for its own FQDN (samba_cert_domain), never a shared SAN cert
+# (that would mean copying a private key between hosts).
+#
+# Idempotent and renewal-safe: community.crypto.acme_certificate only issues
+# a new certificate once fewer than samba_cert_remaining_days remain, so a
+# normal run is a no-op once the certificate is fresh, and the DNS challenge
+# record is only published/removed on the runs that actually issue.
+
+- name: Ensure the certificate directory exists
+  ansible.builtin.file:
+    path: "{{ samba_cert_dir }}"
+    state: directory
+    mode: "0750"
+  become: true
+
+- name: Generate the ACME account key
+  community.crypto.openssl_privatekey:
+    path: "{{ samba_cert_dir }}/acme-account.pem"
+    type: RSA
+    size: 4096
+    mode: "0600"
+  become: true
+
+- name: Generate the certificate private key
+  community.crypto.openssl_privatekey:
+    path: "{{ samba_cert_key_file }}"
+    type: RSA
+    size: 4096
+    mode: "0600"
+  become: true
+
+- name: Generate the certificate signing request
+  community.crypto.openssl_csr:
+    path: "{{ samba_cert_dir }}/acme.csr"
+    privatekey_path: "{{ samba_cert_key_file }}"
+    common_name: "{{ samba_cert_domain }}"
+    subject_alt_name: ["DNS:{{ samba_cert_domain }}"]
+  become: true
+
+# First pass: creates/loads the ACME order. Returns pending DNS-01 challenges
+# (challenge_data_dns: {full_acme_challenge_domain: [txt_value, ...]}) only
+# when a new certificate is actually needed - otherwise this reports no
+# change and everything below is skipped.
+- name: Request certificate order (or check current one's remaining validity)
+  community.crypto.acme_certificate:
+    account_key_src: "{{ samba_cert_dir }}/acme-account.pem"
+    account_email: "{{ samba_cert_acme_account_email }}"
+    terms_agreed: "{{ samba_cert_acme_terms_agreed }}"
+    acme_directory: "{{ samba_cert_acme_directory_url }}"
+    acme_version: "{{ samba_cert_acme_version }}"
+    challenge: dns-01
+    csr: "{{ samba_cert_dir }}/acme.csr"
+    dest: "{{ samba_cert_cert_file }}"
+    fullchain_dest: "{{ samba_cert_fullchain_file }}"
+    chain_dest: "{{ samba_cert_ca_file }}"
+    remaining_days: "{{ samba_cert_remaining_days }}"
+  register: samba_cert_order
+  become: true
+
+- name: Publish, finalize and clean up the DNS-01 challenge
+  when: samba_cert_order is changed
+  become: true
+  block:
+    - name: Publish the DNS-01 challenge record(s)
+      ansible.builtin.include_role:
+        name: technitium_dns
+        tasks_from: acme_dns01_record
+      vars:
+        technitium_dns_acme_api_url: "{{ technitium_dns_api_url }}"
+        technitium_dns_acme_api_token: "{{ technitium_dns_api_token }}"
+        technitium_dns_acme_zone: "{{ samba_cert_acme_dns_zone | default(omit) }}"
+        technitium_dns_acme_records: >-
+          {{ [{'domain': (samba_cert_acme_challenge_alias if samba_cert_acme_dns_zone | length > 0 else challenge.key),
+               'value': challenge.value | first}] }}
+        technitium_dns_acme_state: present
+      loop: "{{ samba_cert_order.challenge_data_dns | default({}) | dict2items }}"
+      loop_control:
+        loop_var: challenge
+        label: "{{ challenge.key }}"
+
+    - name: Finalize the certificate order
+      community.crypto.acme_certificate:
+        account_key_src: "{{ samba_cert_dir }}/acme-account.pem"
+        account_email: "{{ samba_cert_acme_account_email }}"
+        terms_agreed: "{{ samba_cert_acme_terms_agreed }}"
+        acme_directory: "{{ samba_cert_acme_directory_url }}"
+        acme_version: "{{ samba_cert_acme_version }}"
+        challenge: dns-01
+        csr: "{{ samba_cert_dir }}/acme.csr"
+        dest: "{{ samba_cert_cert_file }}"
+        fullchain_dest: "{{ samba_cert_fullchain_file }}"
+        chain_dest: "{{ samba_cert_ca_file }}"
+        remaining_days: "{{ samba_cert_remaining_days }}"
+        data: "{{ samba_cert_order }}"
+      notify: Restart samba-ad-dc
+
+    - name: Remove the DNS-01 challenge record(s)
+      ansible.builtin.include_role:
+        name: technitium_dns
+        tasks_from: acme_dns01_record
+      vars:
+        technitium_dns_acme_api_url: "{{ technitium_dns_api_url }}"
+        technitium_dns_acme_api_token: "{{ technitium_dns_api_token }}"
+        technitium_dns_acme_zone: "{{ samba_cert_acme_dns_zone | default(omit) }}"
+        technitium_dns_acme_records: >-
+          {{ [{'domain': (samba_cert_acme_challenge_alias if samba_cert_acme_dns_zone | length > 0 else challenge.key),
+               'value': challenge.value | first}] }}
+        technitium_dns_acme_state: absent
+      loop: "{{ samba_cert_order.challenge_data_dns | default({}) | dict2items }}"
+      loop_control:
+        loop_var: challenge
+        label: "{{ challenge.key }}"

@@ -1,0 +1,53 @@
+---
+# Samba AD domain: dc1 (writable DC) + dc2 (RODC).
+#
+# dc1/dc2 are expected to be provisioned out-of-band (e.g. by Terraform),
+# not by this playbook. `common` is a sibling role from the source monorepo
+# (proxmox-ansible-roles) not vendored here — provide it yourself, or drop
+# it and pre-bake the baseline (hostname, /etc/hosts, packages, timezone).
+#
+# Order matters: install Samba on both → provision dc1 (which also creates
+# the AD zone in Technitium and pushes dc1's DNS records) → join dc2 as RODC
+# (which pushes dc2's DNS records) → configure WINS/NTP-signing/LDAPS
+# certificate on both. DNS is Technitium, not Samba's own — see README.md
+# "DNS" and docs/adr/0001-external-dns-via-technitium.md. The LDAPS
+# certificate is also requested via Technitium (DNS-01) — see README.md
+# "Certificates" and docs/adr/0003-ldaps-cert-via-acme-dns01.md.
+
+- name: Wait for dc1/dc2 to be reachable
+  hosts: samba_dc_servers
+  gather_facts: false
+  tasks:
+    - ansible.builtin.wait_for_connection:
+        timeout: 300
+
+- name: Baseline configuration (hostname, /etc/hosts, base packages, timezone)
+  hosts: samba_dc_servers
+  roles:
+    - common
+
+- name: Install Samba on dc1 and dc2
+  hosts: samba_dc_servers
+  roles:
+    - samba_dc
+
+- name: Provision the domain on dc1
+  hosts: samba_dc_primary
+  tasks:
+    - ansible.builtin.include_role:
+        name: samba_dc
+        tasks_from: provision
+
+- name: Join dc2 as a secondary domain controller
+  hosts: samba_dc_secondary:samba_dc_rodc
+  tasks:
+    - ansible.builtin.include_role:
+        name: samba_dc
+        tasks_from: join_secondary
+
+- name: Configure WINS, NTP signing, and the LDAPS certificate on both DCs
+  hosts: samba_dc_servers
+  tasks:
+    - ansible.builtin.include_role:
+        name: samba_dc
+        tasks_from: configure

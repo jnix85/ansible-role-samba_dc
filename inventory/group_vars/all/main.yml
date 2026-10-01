@@ -1,0 +1,13 @@
+---
+# domain and vm_fqdn now come from ../shared-inventory (see ansible.cfg's
+# inventory list and shared-inventory/README.md). group_vars/samba_dc_servers
+# overrides vm_fqdn to live under the AD zone instead.
+#
+# Deliberately no VIP for the Samba AD pair itself (unlike shared-inventory's
+# `vips`, which lists floating IPs for other HA services) — AD clients
+# locate DCs via DNS SRV records / the DC-locator process and talk to each
+# DC directly, so no entry for dc1/dc2 belongs in `vips`. The role does
+# still read the existing `vips.dns` (Technitium) entry: as dc1/dc2's sole
+# resolv.conf nameserver, and as the target for technitium_dns_api_url (the
+# AD zone's DNS lives in Technitium, not Samba — see README.md "DNS" and
+# docs/adr/0001-external-dns-via-technitium.md).

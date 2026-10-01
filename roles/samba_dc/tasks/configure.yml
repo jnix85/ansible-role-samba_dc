@@ -1,0 +1,72 @@
+---
+# Runs on dc1 and dc2 after provision.yml/join_rodc.yml — both need a live
+# samba-ad-dc.service first (WINS is a runtime smb.conf setting; NTP signing
+# needs the ntp_signd socket directory samba-ad-dc creates on start).
+#
+# No DNS configuration belongs here: DNS is external (Technitium), pushed
+# declaratively from provision.yml/join_rodc.yml — Samba never runs its own
+# DNS server or talks to DNS at all (see README.md). The one exception is the
+# LDAPS certificate below, which briefly calls into technitium_dns only to
+# publish/remove its own ACME DNS-01 challenge record — see tasks/certificate.yml.
+
+- name: Configure WINS in smb.conf
+  ansible.builtin.blockinfile:
+    path: /etc/samba/smb.conf
+    insertafter: "^\\[global\\]"
+    marker: "# {mark} ANSIBLE MANAGED BLOCK (samba_dc: wins)"
+    block: |
+      {% if samba_wins_support | bool %}
+      wins support = yes
+      {% else %}
+      wins support = no
+      wins server = {{ samba_wins_server }}
+      {% endif %}
+  become: true
+  notify: Restart samba-ad-dc
+
+- name: Configure chrony to sign NTP replies for domain-joined clients
+  ansible.builtin.blockinfile:
+    path: /etc/chrony/chrony.conf
+    marker: "# {mark} ANSIBLE MANAGED BLOCK (samba_dc: ntp signing)"
+    block: |
+      pool {{ samba_ntp_pool }} iburst
+      bindcmdaddress {{ samba_ntp_signd_dir }}/socket
+      allow {{ samba_primary_ip }}
+      allow {{ samba_secondary_ip }}
+  become: true
+  notify: Restart chrony
+
+- name: Point smb.conf at the chrony NTP-signing socket
+  ansible.builtin.lineinfile:
+    path: /etc/samba/smb.conf
+    insertafter: "^\\[global\\]"
+    regexp: "^\\s*ntp signd socket directory\\s*="
+    line: "        ntp signd socket directory = {{ samba_ntp_signd_dir }}"
+  become: true
+  notify: Restart samba-ad-dc
+
+- name: Ensure chrony is enabled and running
+  ansible.builtin.systemd:
+    name: chrony
+    state: started
+    enabled: true
+  become: true
+
+- name: Request/renew this DC's LDAPS certificate and point smb.conf at it
+  when: samba_cert_enabled | bool
+  block:
+    - name: Request/renew the ACME certificate (see tasks/certificate.yml)
+      ansible.builtin.include_tasks: certificate.yml
+
+    - name: Configure LDAPS TLS in smb.conf
+      ansible.builtin.blockinfile:
+        path: /etc/samba/smb.conf
+        insertafter: "^\\[global\\]"
+        marker: "# {mark} ANSIBLE MANAGED BLOCK (samba_dc: tls)"
+        block: |
+          tls enabled = yes
+          tls keyfile = {{ samba_cert_key_file }}
+          tls certfile = {{ samba_cert_fullchain_file }}
+          tls cafile = {{ samba_cert_ca_file }}
+      become: true
+      notify: Restart samba-ad-dc

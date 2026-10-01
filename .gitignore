@@ -1,0 +1,65 @@
+.env
+*.retry
+__pycache__/
+
+# ansible-vault password file — never commit this. The encrypted vault.yml
+# files themselves are safe to commit.
+.vault_pass
+.vault_pass.*
+
+# ==============================================================================
+# AI Assistants, Agents & Tooling
+# ==============================================================================
+# Claude Code / Anthropic
+.claude/
+CLAUDE.local.md
+
+# Cursor AI
+.cursor/
+.cursorrules
+.cursorignore
+.cursorindexingignore
+
+# Aider
+.aider*
+.aider.input.history
+.aider.chat.history.md
+.aider.llm.history
+.aider.tags.cache.v*
+
+# Google Gemini / Antigravity
+.gemini/
+gemini-debug.log
+.gemini-clipboard/
+
+# OpenAI / Codex / ChatGPT
+.codex/
+.openai/
+
+# Cline / Roo-Cline
+.cline/
+.clinerules
+cline_docs/
+
+# Continue
+.continue/
+.continuerc.json
+
+# Windsurf
+.windsurf/
+.windsurfrules
+
+# Serena MCP, comP & CodeSight
+.serena/
+.comp/
+.codesight/
+.agents/
+
+# Other AI dev tools
+.warp/
+.crush/
+.codeium/
+.deepseek/
+.amazon-codewhisperer/
+.tabnine/
+.tabnineignore

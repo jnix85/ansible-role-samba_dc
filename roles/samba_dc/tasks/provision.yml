@@ -1,0 +1,107 @@
+---
+# dc1 only. Idempotency guard: samba-tool domain provision is not itself
+# re-runnable, so gate the whole thing on sam.ldb not existing yet.
+#
+# DNS is external (Technitium), not Samba's own AD-integrated DNS — see
+# README.md. The AD zone is ensured in Technitium before provisioning (its
+# records need somewhere to land), and dc1's DNS records are pushed
+# declaratively afterward — Samba itself never talks to DNS.
+
+- name: Ensure the AD zone exists in Technitium
+  ansible.builtin.include_role:
+    name: technitium_dns
+    tasks_from: samba_ad_zone
+  vars:
+    technitium_dns_samba_api_url: "{{ technitium_dns_api_url }}"
+    technitium_dns_samba_api_token: "{{ technitium_dns_api_token }}"
+    technitium_dns_samba_zone: "{{ samba_dns_zone }}"
+
+- name: Check whether the domain is already provisioned
+  ansible.builtin.stat:
+    path: /var/lib/samba/private/sam.ldb
+  register: samba_dc_provisioned
+  become: true
+
+- name: Provision the AD domain
+  when: not samba_dc_provisioned.stat.exists
+  become: true
+  no_log: true
+  block:
+    # samba-tool has no stdin/env path for --adminpass, so it's briefly
+    # visible in `ps` on this host during provisioning (root-only, one-shot,
+    # matches how samba deployments generally accept this trade-off).
+    - name: Run samba-tool domain provision
+      ansible.builtin.command:
+        cmd: >-
+          samba-tool domain provision --use-rfc2307
+          --realm={{ samba_realm }}
+          --domain={{ samba_domain }}
+          --server-role=dc
+          --dns-backend=NONE
+          --adminpass={{ samba_admin_password | quote }}
+      register: samba_dc_provision_result
+      changed_when: true
+
+    - name: Enable and start samba-ad-dc.service
+      ansible.builtin.systemd:
+        name: samba-ad-dc
+        state: started
+        enabled: true
+        daemon_reload: true
+
+    - name: Point resolv.conf at the Technitium DNS cluster
+      ansible.builtin.copy:
+        content: |
+          nameserver {{ vips.dns }}
+          search {{ domain }}
+        dest: /etc/resolv.conf
+        mode: "0644"
+
+- name: Ensure samba-ad-dc.service is running (idempotent re-run)
+  ansible.builtin.systemd:
+    name: samba-ad-dc
+    state: started
+    enabled: true
+  become: true
+  when: samba_dc_provisioned.stat.exists
+
+- name: Push Samba AD DNS records into Technitium
+  ansible.builtin.include_role:
+    name: technitium_dns
+    tasks_from: samba_ad_records
+  vars:
+    technitium_dns_samba_api_url: "{{ technitium_dns_api_url }}"
+    technitium_dns_samba_api_token: "{{ technitium_dns_api_token }}"
+    technitium_dns_samba_zone: "{{ samba_dns_zone }}"
+    technitium_dns_samba_records: "{{ samba_dns_records }}"
+
+- name: Query primary DC NTDS Settings objectGUID for replication DNS
+  ansible.builtin.shell:
+    cmd: >-
+      python3 -c "import subprocess, sys, re;
+      out = subprocess.check_output(['ldbsearch', '-H', '/var/lib/samba/private/sam.ldb', '(invocationId=*)', '--cross-ncs', 'dn', 'objectGUID'], text=True);
+      for block in out.split('\n\n'):
+          if re.search(r'CN=' + re.escape('{{ inventory_hostname }}') + r',CN=Servers', block, re.I):
+              m = re.search(r'objectGUID:\s*([0-9a-fA-F-]+)', block)
+              if m:
+                  print(m.group(1).lower().strip()); sys.exit(0)
+      sys.exit(1)"
+  register: samba_primary_ntds_guid_result
+  changed_when: false
+  failed_when: false
+  become: true
+
+- name: Push primary DC NTDS GUID replication CNAME into Technitium
+  when: samba_primary_ntds_guid_result.rc == 0 and samba_primary_ntds_guid_result.stdout | length > 0
+  ansible.builtin.include_role:
+    name: technitium_dns
+    tasks_from: samba_ad_records
+  vars:
+    technitium_dns_samba_api_url: "{{ technitium_dns_api_url }}"
+    technitium_dns_samba_api_token: "{{ technitium_dns_api_token }}"
+    technitium_dns_samba_zone: "{{ samba_dns_zone }}"
+    technitium_dns_samba_records:
+      - domain: "{{ samba_primary_ntds_guid_result.stdout.strip() }}._msdcs.{{ samba_dns_zone }}"
+        type: CNAME
+        data: { cname: "{{ samba_primary_fqdn }}" }
+        exclusive: true
